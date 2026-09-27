@@ -27,58 +27,94 @@ def process_pdf():
     file_name = payload.get("file_name", "document.pdf")
     chat_id = payload.get("chat_id")
     
-    # 1. Unduh PDF dari server Telegram
     pdf_path = "temp.pdf"
     r = requests.get(file_url)
     with open(pdf_path, 'wb') as f:
         f.write(r.content)
         
-    markdown_content = ""
     doc = fitz.open(pdf_path)
+    markdown_content = ""
+    os.makedirs("extracted_images", exist_ok=True)
     
-    # 2. Cek apakah PDF memiliki teks digital atau berupa gambar (scan)
+    cover_image_path = None
+
+    # 1. Ambil halaman pertama sebagai Cover Buku
+    if len(doc) > 0:
+        first_page = doc[0]
+        pix = first_page.get_pixmap(dpi=150)
+        cover_image_path = "extracted_images/cover.jpg"
+        pix.save(cover_image_path)
+
+    # Cek apakah PDF digital atau scan
     total_text_length = sum(len(page.get_text("text").strip()) for page in doc)
     
     if total_text_length > 100:
-        # Jika teks digital tersedia, ekstrak langsung
+        # Ekstrak teks digital + gambar per halaman
         for page_num in range(len(doc)):
             page = doc[page_num]
-            markdown_content += f"\n\n## Halaman {page_num + 1}\n\n"
-            markdown_content += page.get_text("text")
+            markdown_content += f"\n\n{page.get_text('text')}\n\n"
+            
+            # Ekstrak gambar di halaman tersebut
+            image_list = page.get_images(full=True)
+            for img_index, img in enumerate(image_list):
+                xref = img[0]
+                base_image = doc.extract_image(xref)
+                image_bytes = base_image["image"]
+                image_ext = base_image["ext"]
+                image_filename = f"extracted_images/p{page_num+1}_img{img_index}.{image_ext}"
+                with open(image_filename, "wb") as img_file:
+                    img_file.write(image_bytes)
+                # Sisipkan gambar ke Markdown
+                markdown_content += f"\n\n![Gambar]({image_filename})\n\n"
     else:
-        # Jika berupa gambar/scan, jalankan OCR (Tesseract)
-        send_telegram_message(chat_id, "🔍 PDF terdeteksi berupa gambar/scan. Menjalankan mesin OCR cerdas di cloud...")
+        send_telegram_message(chat_id, "🔍 PDF berupa scan/gambar. Menjalankan OCR...")
         images = convert_from_path(pdf_path)
         for page_num, image in enumerate(images):
-            markdown_content += f"\n\n## Halaman {page_num + 1}\n\n"
-            # Melakukan OCR membaca teks dalam gambar (Bahasa Indonesia & Inggris)
             text = pytesseract.image_to_string(image, lang='ind+eng')
-            markdown_content += text
+            markdown_content += f"\n\n{text}\n\n"
 
     md_path = "output.md"
     with open(md_path, "w", encoding="utf-8") as f:
         f.write(markdown_content)
         
-    # 3. Kompilasi ke EPUB menggunakan Pandoc
+    # 2. Kompilasi ke EPUB dengan Pandoc (Menyertakan Cover jika ada)
     epub_name = file_name.replace(".pdf", ".epub")
-    subprocess.run(["pandoc", md_path, "-o", epub_name, "--toc"])
+    pandoc_command = ["pandoc", md_path, "-o", epub_name, "--toc"]
     
-    # 4. Kirim balik ke Telegram
-    send_telegram_file(chat_id, epub_name, f"✨ Berhasil mengubah {file_name} menjadi EPUB bersih!")
+    if cover_image_path and os.path.exists(cover_image_path):
+        pandoc_command.extend([f"--epub-cover-image={cover_image_path}"])
+
+    subprocess.run(pandoc_command)
+    
+    send_telegram_file(chat_id, epub_name, f"✨ Berhasil mengubah {file_name} menjadi EPUB (Lengkap dengan Cover & Gambar)!")
 
 def process_web():
     target_url = payload.get("target_url")
     chat_id = payload.get("chat_id")
     
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    r = requests.get(target_url, headers=headers)
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    
+    try:
+        # Mengatasi error SSL kedaluwarsa (seperti pada link kask.us) dengan verify=False
+        r = requests.get(target_url, headers=headers, verify=False, timeout=15)
+        r.raise_for_status()
+    except Exception as e:
+        send_telegram_message(chat_id, f"❌ Gagal mengakses web. Error SSL/Koneksi: {str(e)}")
+        return
+
     soup = BeautifulSoup(r.text, 'html.parser')
     
     title = soup.title.string if soup.title else "Web Article"
-    paragraphs = soup.find_all('p')
+    
+    # Khusus Kaskus atau forum, biasanya konten ada di tag artikel atau paragraf khusus
+    paragraphs = soup.find_all(['p', 'article', 'div'])
     body_text = f"# {title}\n\n*Sumber: {target_url}*\n\n"
+    
+    # Menyaring teks agar tidak mengambil menu navigasi sampah
     for p in paragraphs:
-        body_text += p.get_text() + "\n\n"
+        text = p.get_text().strip()
+        if len(text) > 40:  # Ambil paragraf yang bermakna
+            body_text += text + "\n\n"
         
     md_path = "web_output.md"
     with open(md_path, "w", encoding="utf-8") as f:
@@ -87,7 +123,7 @@ def process_web():
     epub_name = "artikel_web.epub"
     subprocess.run(["pandoc", md_path, "-o", epub_name, "--toc"])
     
-    send_telegram_file(chat_id, epub_name, f"✨ Berhasil merakit web menjadi EPUB: {title}")
+    send_telegram_file(chat_id, epub_name, f"✨ Berhasil merakit web Kaskus menjadi EPUB: {title}")
 
 if __name__ == "__main__":
     try:
