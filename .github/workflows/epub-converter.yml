@@ -23,7 +23,7 @@ jobs:
 
       - name: Install Python Libraries
         run: |
-          pip install requests pymupdf beautifulsoup4
+          pip install requests pymupdf beautifulsoup4 pytesseract pdf2image
 
       - name: Run Conversion Script
         env:
