@@ -2,8 +2,10 @@ import os
 import json
 import subprocess
 import requests
-import fitz  # PyMuPDF untuk ekstrak teks PDF
+import fitz  # PyMuPDF
 from bs4 import BeautifulSoup
+import pytesseract
+from pdf2image import convert_from_path
 
 event_type = os.environ.get("EVENT_NAME")
 payload = json.loads(os.environ.get("CLIENT_PAYLOAD", "{}"))
@@ -25,29 +27,43 @@ def process_pdf():
     file_name = payload.get("file_name", "document.pdf")
     chat_id = payload.get("chat_id")
     
-    # Unduh PDF dari server Telegram
+    # 1. Unduh PDF dari server Telegram
     pdf_path = "temp.pdf"
     r = requests.get(file_url)
     with open(pdf_path, 'wb') as f:
         f.write(r.content)
         
-    # Ekstrak teks halaman demi halaman ke format Markdown
     markdown_content = ""
     doc = fitz.open(pdf_path)
-    for page_num in range(len(doc)):
-        page = doc[page_num]
-        markdown_content += f"\n\n## Halaman {page_num + 1}\n\n"
-        markdown_content += page.get_text("text")
-        
+    
+    # 2. Cek apakah PDF memiliki teks digital atau berupa gambar (scan)
+    total_text_length = sum(len(page.get_text("text").strip()) for page in doc)
+    
+    if total_text_length > 100:
+        # Jika teks digital tersedia, ekstrak langsung
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            markdown_content += f"\n\n## Halaman {page_num + 1}\n\n"
+            markdown_content += page.get_text("text")
+    else:
+        # Jika berupa gambar/scan, jalankan OCR (Tesseract)
+        send_telegram_message(chat_id, "🔍 PDF terdeteksi berupa gambar/scan. Menjalankan mesin OCR cerdas di cloud...")
+        images = convert_from_path(pdf_path)
+        for page_num, image in enumerate(images):
+            markdown_content += f"\n\n## Halaman {page_num + 1}\n\n"
+            # Melakukan OCR membaca teks dalam gambar (Bahasa Indonesia & Inggris)
+            text = pytesseract.image_to_string(image, lang='ind+eng')
+            markdown_content += text
+
     md_path = "output.md"
     with open(md_path, "w", encoding="utf-8") as f:
         f.write(markdown_content)
         
-    # Kompilasi ke EPUB menggunakan Pandoc
+    # 3. Kompilasi ke EPUB menggunakan Pandoc
     epub_name = file_name.replace(".pdf", ".epub")
     subprocess.run(["pandoc", md_path, "-o", epub_name, "--toc"])
     
-    # Kirim balik ke Telegram
+    # 4. Kirim balik ke Telegram
     send_telegram_file(chat_id, epub_name, f"✨ Berhasil mengubah {file_name} menjadi EPUB bersih!")
 
 def process_web():
